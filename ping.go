@@ -197,6 +197,11 @@ func main() {
 	flag.Parse()
 	addr := flag.Arg(0) // ./ping {addr = IP || DomainName}
 
+	if flag.NArg() == 0 {
+		fmt.Println("mising hostname")
+		os.Exit(1)
+	}
+
 	// new ping client
 	client, err := NewClient(addr)
 	if err != nil {
