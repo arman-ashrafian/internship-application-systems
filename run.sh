@@ -4,4 +4,4 @@
 go build ping.go
 
 # run
-sudo ./ping -t 60 www.google.com  
+sudo ./ping -s 40 www.google.com

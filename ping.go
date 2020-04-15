@@ -14,6 +14,7 @@ Supports both IPv4 and IPv6 addresses
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"net"
@@ -42,10 +43,12 @@ type PingClient struct {
 	TotalTime float64     // total rtt time for average
 	RTTMax    float64     // max rtt time
 	RTTMin    float64     // min rtt time
+	MsgSize   int         // message body size (bytes)
+	PLost     int         // total packets lost
 }
 
 // Initialize and return a new PingClient
-func NewClient(addr string) (*PingClient, error) {
+func NewClient(addr string, msgSize int) (*PingClient, error) {
 	// resolve ip address
 	ipaddr, err := net.ResolveIPAddr("ip", addr)
 
@@ -68,6 +71,8 @@ func NewClient(addr string) (*PingClient, error) {
 		TotalTime: 0,
 		RTTMax:    -1e5,
 		RTTMin:    1e5,
+		MsgSize:   msgSize,
+		PLost:     0,
 	}, nil
 }
 
@@ -76,41 +81,38 @@ func (pc *PingClient) Ping(ttl int) error {
 	var proto int
 	var network string
 	var msgType icmp.Type
-	var replyType icmp.Type
 
 	if pc.IPv4 {
 		proto = ProtocolICMP
 		network = "ip4:icmp"
 		msgType = ipv4.ICMPTypeEcho
-		replyType = ipv4.ICMPTypeEchoReply
 	} else {
 		proto = ProtocolICMPv6
 		network = "ip6:ipv6-icmp"
 		msgType = ipv6.ICMPTypeEchoRequest
-		replyType = ipv6.ICMPTypeEchoReply
 	}
 
 	// listen to icmp replies
 	c, err := icmp.ListenPacket(network, "0.0.0.0")
-
-	// turn on ttl flag
-	if pc.IPv4 {
-		c.IPv4PacketConn().SetControlMessage(ipv4.FlagTTL, true)
-	} else {
-		c.IPv6PacketConn().SetControlMessage(ipv6.FlagHopLimit, true)
-	}
-
 	if err != nil {
 		return err
 	}
 
+	// set up ttl
+	if pc.IPv4 {
+		c.IPv4PacketConn().SetTTL(ttl)
+	} else {
+		c.IPv6PacketConn().SetHopLimit(ttl)
+	}
+
 	// make message
+	messageData := bytes.Repeat([]byte("a"), pc.MsgSize)
 	m := icmp.Message{
 		Type: msgType, Code: 0,
 		Body: &icmp.Echo{
 			ID:   os.Getpid() & 0xffff, // example in docs does this
 			Seq:  pc.Seq,
-			Data: []byte("ping message"), // TODO: parameterize msg/msgsize
+			Data: messageData,
 		},
 	}
 	pc.Seq++
@@ -132,31 +134,15 @@ func (pc *PingClient) Ping(ttl int) error {
 
 	// wait for reply
 	reply := make([]byte, 500)
-	err = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	err = c.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if err != nil {
 		return err
 	}
 
 	// read reply message
-	var pttl int
-	if pc.IPv4 {
-		_, cm, _, err := c.IPv4PacketConn().ReadFrom(reply)
-		if err != nil {
-			return err
-		}
-		pttl = cm.TTL
-	} else {
-		_, cm, _, err := c.IPv6PacketConn().ReadFrom(reply)
-		if err != nil {
-			return err
-		}
-		pttl = cm.HopLimit
-
-	}
-
-	if pttl > ttl {
-		fmt.Println("timer exceeded")
-		return nil
+	n, _, err = c.ReadFrom(reply)
+	if err != nil {
+		return err
 	}
 
 	duration := time.Since(start)
@@ -173,28 +159,51 @@ func (pc *PingClient) Ping(ttl int) error {
 
 	// parse reply
 	rMsg, err := icmp.ParseMessage(proto, reply[:n])
-	rMsgLen := rMsg.Body.Len(proto)
 	if err != nil {
 		return err
 	}
 
-	switch rMsg.Type {
-	case replyType:
+	if n == 0 {
+		fmt.Println("time limit exceeded")
+	} else {
 		pc.PacketIn++
-		fmt.Printf("%d bytes recieved (0%% loss) from %s icmp_seq=%d time=%.1f ms\n",
-			rMsgLen, pc.IPAddr, pc.Seq, dur_ms)
-		return nil
-	default:
-		return fmt.Errorf("error")
+		pLost := 0
+
+		switch p := rMsg.Body.(type) {
+		case *icmp.Echo:
+			// definetly lost data
+			if len(p.Data) < len(messageData) {
+				pLost += len(messageData) - len(p.Data)
+				for i := 0; i < len(p.Data); i++ {
+					if messageData[i] != p.Data[i] {
+						pLost++
+					}
+				}
+			} else { // check if we lost data
+				for i := 0; i < len(messageData); i++ {
+					if messageData[i] != p.Data[i] {
+						pLost++
+					}
+				}
+
+				lossPercent := (float64(pLost) / float64(len(messageData))) * 100
+
+				fmt.Printf("%d bytes recieved (%.1f%% loss) from %s icmp_seq=%d time=%.1f ms\n",
+					len(p.Data), lossPercent, pc.IPAddr, pc.Seq, dur_ms)
+			}
+		}
 	}
 
+	return nil
 }
 
 func main() {
-	var ttl int
+	var msgSize, ttl int
 
-	flag.IntVar(&ttl, "t", 64, "Time to live in ms")
+	flag.IntVar(&msgSize, "s", 64, "Size (in bytes) of ping message")
+	flag.IntVar(&ttl, "t", 64, "Time to live, number L3 hops before packet dies")
 	flag.Parse()
+
 	addr := flag.Arg(0) // ./ping {addr = IP || DomainName}
 
 	if flag.NArg() == 0 {
@@ -203,7 +212,7 @@ func main() {
 	}
 
 	// new ping client
-	client, err := NewClient(addr)
+	client, err := NewClient(addr, msgSize)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -214,7 +223,7 @@ func main() {
 	signal.Notify(sigchan, os.Interrupt)
 	go func(client *PingClient) {
 		for _ = range sigchan {
-			loss := (float64(client.PacketOut-client.PacketIn) / float64(client.PacketOut)) * 100
+			loss := (float64(client.PLost) / float64(client.PacketOut*client.MsgSize)) * 100
 			fmt.Println("\n------ Ping Statistics ------")
 			fmt.Printf("packets sent: %d, packets received: %d, %.0f%% loss\n",
 				client.PacketOut, client.PacketIn, loss)

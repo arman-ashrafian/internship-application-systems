@@ -1,5 +1,18 @@
 # Cloudflare Internship Application: Systems
 
+## usage
+
+```
+# ping google.com
+sudo ./ping www.google.com 
+
+# ping google.com with a message of size 50 bytes
+sudo ./ping -s 50 www.google.com
+
+# ping google.com with TTL set to 50
+sudo ./ping -t 50 www.google.com
+```
+
 ## What is it?
 
 Please write a small Ping CLI application for MacOS or Linux.
