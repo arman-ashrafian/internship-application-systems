@@ -223,7 +223,10 @@ func main() {
 	signal.Notify(sigchan, os.Interrupt)
 	go func(client *PingClient) {
 		for _ = range sigchan {
-			loss := (float64(client.PLost) / float64(client.PacketOut*client.MsgSize)) * 100
+			var loss float64 = 100
+			if client.PacketIn > 0 {
+				loss = (float64(client.PLost) / float64(client.PacketOut*client.MsgSize)) * 100
+			}
 			fmt.Println("\n------ Ping Statistics ------")
 			fmt.Printf("packets sent: %d, packets received: %d, %.0f%% loss\n",
 				client.PacketOut, client.PacketIn, loss)
